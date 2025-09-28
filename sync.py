@@ -85,7 +85,7 @@ def stream_gitlab_events(since_date):
     while True:
         url = (
             f"{GITLAB_API_URL}/users/{GITLAB_USER_ID}/events"
-            f"?after={since_date}&per_page={COMMITS_PER_PAGE}&page={page}&sort=asc"
+            f"?after={since_date}&per_page={COMMITS_PER_PAGE}&page={page}&action=pushed&sort=asc"
         )
         try:
             response = requests.get(url, headers=HEADERS, timeout=10)
