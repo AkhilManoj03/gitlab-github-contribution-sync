@@ -9,10 +9,9 @@ from datetime import datetime, timedelta, UTC
 dotenv.load_dotenv()
 
 COMMITS_PER_PAGE = 100
-# Set default to 1 year ago
 DEFAULT_START_DATE = (
     datetime.now(UTC).replace(microsecond=0) - timedelta(days=365)
-).strftime("%Y-%m-%dT%H:%M:%SZ")
+).strftime("%Y-%m-%dT%H:%M:%SZ") # Default start date is 1 year ago
 
 # Secrets
 GITLAB_USER_ID = os.getenv("GITLAB_USER_ID")
@@ -115,7 +114,11 @@ def sync_events_and_update_state(events):
     for event in events:
         commit_id = event["id"]
         commit_date_str = event["created_at"]
-        commit_date = datetime.fromisoformat(commit_date_str).strftime("%Y-%m-%d %H:%M:%S")
+        commit_date = (
+            datetime.fromisoformat(
+                commit_date_str.replace("Z", "+00:00")
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        ) # Convert the commit date to a string in the format YYYY-MM-DD HH:MM:SS
         commit_env = os.environ.copy()
         commit_env['GIT_AUTHOR_DATE'] = commit_date
         commit_env['GIT_COMMITTER_DATE'] = commit_date
@@ -140,9 +143,11 @@ def sync_events_and_update_state(events):
 
     # We add one second to the next start date to avoid fetching the same last event again
     next_start_dt = datetime.fromisoformat(last_event_date.replace('Z', '+00:00')) + timedelta(seconds=1)
+    # Normalize to UTC and ensure seconds precision with trailing 'Z'
+    next_start_dt_utc = next_start_dt.astimezone(UTC).replace(microsecond=0)
 
     with open(STATE_FILE, 'w') as f:
-        f.write(next_start_dt.isoformat().replace('+00:00', 'Z'))
+        f.write(next_start_dt_utc.isoformat().replace('+00:00', 'Z'))
 
     subprocess.run(['git', 'add', STATE_FILE], check=True)
     subprocess.run(
