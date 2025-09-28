@@ -1,6 +1,7 @@
 import dotenv
 import json
 import os
+import shutil
 import requests
 import subprocess
 import sys
@@ -40,7 +41,6 @@ required_vars = [
     "GITHUB_TOKEN",
     "GITHUB_USERNAME",
 ]
-
 missing = [var for var in required_vars if not os.getenv(var)]
 if missing:
     print(f"error: Missing required environment variables: {', '.join(missing)}")
@@ -165,6 +165,7 @@ def sync_events_and_update_state(events):
 def main():
     """Main function to run the sync process."""
     original_cwd = os.getcwd()
+    repo_path = os.path.join(original_cwd, GITHUB_REPO_NAME)
     try:
         setup_github_repo()
         start_date = get_last_sync_date()
@@ -178,6 +179,13 @@ def main():
         print(f"An unexpected error occurred: {e}")
     finally:
         os.chdir(original_cwd)
+        # Remove the local clone from the parent directory
+        try:
+            if os.path.isdir(repo_path):
+                shutil.rmtree(repo_path)
+                print(f"info: Removed local clone at: {repo_path}")
+        except Exception as e:
+            print(f"warn: Failed to remove local repo at {repo_path}: {e}")
 
 if __name__ == "__main__":
     main()
