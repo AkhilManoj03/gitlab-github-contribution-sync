@@ -1,13 +1,14 @@
 import dotenv
 import json
 import os
-import shutil
 import requests
 import subprocess
 import sys
-from datetime import datetime, timedelta, UTC
-from typing import Generator, Optional
+import tempfile
 import uuid
+from datetime import datetime, timedelta, UTC
+from pathlib import Path
+from typing import Generator, Optional
 
 dotenv.load_dotenv()
 
@@ -52,25 +53,23 @@ if missing:
 session = requests.Session()
 session.headers.update(HEADERS)
 
-def setup_github_repo() -> str:
-    """Clones the GitHub repo if it doesn't exist, ensures target 
+def setup_github_repo(repo_path: Path) -> str:
+    """Clones the GitHub repo, ensures target 
     branch is current, and creates a unique sync branch.
+
+    Args:
+        repo_path: Path to clone the repository into.
 
     Returns the created branch name.
     """
-    if os.path.exists(GITHUB_REPO_NAME):
-        print(f"info: Repository '{GITHUB_REPO_NAME}' already exists. Pulling latest changes...")
-        os.chdir(GITHUB_REPO_NAME)
-    else:
-        print(f"info: Cloning repository '{GITHUB_REPO_NAME}'...")
-        subprocess.run(['git', 'clone', GITHUB_REPO_URL], check=True)
-        os.chdir(GITHUB_REPO_NAME)
+    print(f"info: Cloning repository '{GITHUB_REPO_NAME}'...")
+    subprocess.run(['git', 'clone', GITHUB_REPO_URL, str(repo_path)], check=True)
 
     # Ensure local target branch is up to date
     try:
-        subprocess.run(['git', 'fetch', 'origin'], check=True)
-        subprocess.run(['git', 'checkout', TARGET_BRANCH], check=True)
-        subprocess.run(['git', 'pull', 'origin', TARGET_BRANCH], check=True)
+        subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True)
+        subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
+        subprocess.run(['git', 'pull', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
     except subprocess.CalledProcessError as e:
         print(f"error: Failed to prepare target branch '{TARGET_BRANCH}': {e.stderr}")
         raise
@@ -79,23 +78,26 @@ def setup_github_repo() -> str:
     timestamp = datetime.now(UTC).strftime('%Y%m%d%H%M%S')
     branch_name = f"sync/gitlab-{timestamp}-{uuid.uuid4().hex[:8]}"
     try:
-        subprocess.run(['git', 'checkout', '-b', branch_name], check=True)
+        subprocess.run(['git', 'checkout', '-b', branch_name], cwd=repo_path, check=True)
     except subprocess.CalledProcessError as e:
         print(f"error: Failed to create sync branch '{branch_name}': {e.stderr}")
         raise
 
     return branch_name
 
-def get_last_sync_date() -> str:
+def get_last_sync_date(repo_path: Path) -> str:
     """
     Reads the last sync date from the state file within the repo,
     or returns the default if the file doesn't exist.
+
+    Args:
+        repo_path: Path to the repository.
     """
+    state_file_path = repo_path / STATE_FILE
     try:
-        with open(STATE_FILE, 'r') as f:
-            date_str = f.read().strip()
-            print(f"info: Found state file. Starting sync from: {date_str}")
-            return date_str
+        date_str = state_file_path.read_text().strip()
+        print(f"info: Found state file. Starting sync from: {date_str}")
+        return date_str
     except FileNotFoundError:
         print(
             f"info: State file '{STATE_FILE}' not found in repo. "
@@ -132,10 +134,14 @@ def stream_gitlab_events(since_date: str) -> Generator[dict, None, None]:
 
         page += 1
 
-def sync_events_and_update_state(events: Generator[dict, None, None]) -> int:
+def sync_events_and_update_state(events: Generator[dict, None, None], repo_path: Path) -> int:
     """
     Creates empty commits for each event, updates the state file,
     and pushes all changes to GitHub.
+
+    Args:
+        events: Generator of GitLab events.
+        repo_path: Path to the repository.
     """
     last_event_date = None
     commit_count = 0
@@ -154,8 +160,12 @@ def sync_events_and_update_state(events: Generator[dict, None, None]) -> int:
 
         try:
             subprocess.run(
-                ['git', 'commit', '--allow-empty', '-m', f'GitLab event ID: {commit_id}', '--date', commit_date],
-                check=True, env=commit_env, capture_output=True, text=True
+                [
+                    'git', 'commit', '--allow-empty',
+                    '-m', f'GitLab event ID: {commit_id}',
+                    '--date', commit_date,
+                ],
+                cwd=repo_path, check=True, env=commit_env, capture_output=True, text=True,
             )
             last_event_date = commit_date_str
             commit_count += 1
@@ -175,75 +185,82 @@ def sync_events_and_update_state(events: Generator[dict, None, None]) -> int:
     # Normalize to UTC and ensure seconds precision with trailing 'Z'
     next_start_dt_utc = next_start_dt.astimezone(UTC).replace(microsecond=0)
 
-    with open(STATE_FILE, 'w') as f:
-        f.write(next_start_dt_utc.isoformat().replace('+00:00', 'Z'))
+    state_file_path = repo_path / STATE_FILE
+    state_file_path.write_text(next_start_dt_utc.isoformat().replace('+00:00', 'Z'))
 
-    subprocess.run(['git', 'add', STATE_FILE], check=True)
-    subprocess.run(
-        ['git', 'commit', '-m', f'CI: Update sync marker to {last_event_date}'],
-        check=True
+    subprocess.run(['git', 'add', STATE_FILE], cwd=repo_path, check=True)
+    
+    # Only commit if there are changes (exit code 1 means there are changes)
+    result = subprocess.run(
+        ['git', 'diff', '--cached', '--quiet'],
+        cwd=repo_path, capture_output=True,
     )
+    if result.returncode == 1:
+        subprocess.run(
+            ['git', 'commit', '-m', f'CI: Update sync marker to {last_event_date}'],
+            cwd=repo_path, check=True,
+        )
 
     return commit_count
 
 def main() -> None:
     """Main function to run the sync process."""
-    original_cwd = os.getcwd()
-    repo_path = os.path.join(original_cwd, GITHUB_REPO_NAME)
-    try:
-        branch_name = setup_github_repo()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo_path = Path(temp_dir) / GITHUB_REPO_NAME
+        try:
+            branch_name = setup_github_repo(repo_path)
 
-        start_date = get_last_sync_date()
+            start_date = get_last_sync_date(repo_path)
 
-        # Create the generator object with the start date
-        gitlab_events = stream_gitlab_events(since_date=start_date)
+            # Create the generator object with the start date
+            gitlab_events = stream_gitlab_events(since_date=start_date)
 
-        # Process the events and update the state file (on the sync branch)
-        commit_count = sync_events_and_update_state(gitlab_events)
+            # Process the events and update the state file (on the sync branch)
+            commit_count = sync_events_and_update_state(gitlab_events, repo_path)
 
-        # Nothing to merge
-        if not commit_count:
+            # Nothing to merge
+            if not commit_count:
+                try:
+                    subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
+                    subprocess.run(['git', 'branch', '-D', branch_name], cwd=repo_path, check=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"warn: Failed to clean up empty sync branch '{branch_name}': {e.stderr}")
+                return
+
+            # Merge the sync branch into the target branch
             try:
-                subprocess.run(['git', 'checkout', TARGET_BRANCH], check=True)
-                subprocess.run(['git', 'branch', '-D', branch_name], check=True)
+                subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
+                subprocess.run(
+                    [
+                        'git', 'merge', '--no-ff', branch_name,
+                        '-m', f'Merge synchronization branch {branch_name}',
+                    ],
+                    cwd=repo_path, check=True,
+                )
             except subprocess.CalledProcessError as e:
-                print(f"warn: Failed to clean up empty sync branch '{branch_name}': {e.stderr}")
-            return
+                print(
+                    f"error: Failed to merge sync branch '{branch_name}' into '{TARGET_BRANCH}': {e.stderr}"
+                )
+                return
 
-        # Merge the sync branch into the target branch
-        try:
-            subprocess.run(['git', 'checkout', TARGET_BRANCH], check=True)
-            subprocess.run(['git', 'merge', '--no-ff', branch_name, '-m', f'Merge synchronization branch {branch_name}'], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"error: Failed to merge sync branch '{branch_name}' into '{TARGET_BRANCH}': {e.stderr}")
-            return
+            # Push merged changes
+            print("info: Pushing all changes to GitHub...")
+            try:
+                subprocess.run(['git', 'push', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
+                print("info: Sync complete!")
+            except subprocess.CalledProcessError as e:
+                print(f"error: Failed to push commits to '{TARGET_BRANCH}': {e.stderr}")
+                return
 
-        # Push merged changes
-        print("info: Pushing all changes to GitHub...")
-        try:
-            subprocess.run(['git', 'push', 'origin', TARGET_BRANCH], check=True)
-            print("info: Sync complete!")
-        except subprocess.CalledProcessError as e:
-            print(f"error: Failed to push commits to '{TARGET_BRANCH}': {e.stderr}")
-            return
+            # Delete the local sync branch
+            try:
+                subprocess.run(['git', 'branch', '-D', branch_name], cwd=repo_path, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"warn: Failed to delete local sync branch '{branch_name}': {e.stderr}")
 
-        # Delete the local sync branch
-        try:
-            subprocess.run(['git', 'branch', '-D', branch_name], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"warn: Failed to delete local sync branch '{branch_name}': {e.stderr}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-    finally:
-        os.chdir(original_cwd)
-        # Remove the local clone from the parent directory
-        try:
-            if os.path.isdir(repo_path):
-                shutil.rmtree(repo_path)
-                print(f"info: Removed local clone at: {repo_path}")
-                print(f"info: Finished sync into target branch {TARGET_BRANCH}")
+            print(f"info: Finished sync into target branch {TARGET_BRANCH}")
         except Exception as e:
-            print(f"warn: Failed to remove local repo at {repo_path}: {e}")
+            print(f"An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
     main()
