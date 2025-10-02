@@ -12,7 +12,7 @@ from typing import Generator, Optional
 
 dotenv.load_dotenv()
 
-COMMITS_PER_PAGE = 100
+COMMITS_PER_PAGE = 100 # Max number of commits allowed by GitLab API at once
 DEFAULT_START_DATE = (
     datetime.now(UTC).replace(microsecond=0) - timedelta(days=365)
 ).strftime("%Y-%m-%dT%H:%M:%SZ") # Default start date is 1 year ago
@@ -70,7 +70,7 @@ def stream_gitlab_events(since_date: str) -> Generator[dict, None, None]:
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"error: Failed to fetch events: {e}")
-            return
+            raise
 
         events = response.json()
         if not events or len(events) == 0:
@@ -119,7 +119,7 @@ def sync_events_and_update_state(events: Generator[dict, None, None], repo_path:
             commit_count += 1
         except subprocess.CalledProcessError as e:
             print(f"error: Failed to create commit for event {commit_id}: {e.stderr}")
-            continue
+            raise
 
     if commit_count == 0:
         print("info: No new commits to create.")
@@ -161,9 +161,18 @@ def main() -> None:
 
             # Ensure local target branch is up to date
             try:
-                subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True)
-                subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
-                subprocess.run(['git', 'pull', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
+                subprocess.run(
+                    ['git', 'fetch', 'origin'], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ['git', 'checkout', TARGET_BRANCH], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ['git', 'pull', 'origin', TARGET_BRANCH], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
             except subprocess.CalledProcessError as e:
                 print(f"error: Failed to prepare target branch '{TARGET_BRANCH}': {e.stderr}")
                 raise
@@ -172,7 +181,10 @@ def main() -> None:
             timestamp = datetime.now(UTC).strftime('%Y%m%d%H%M%S')
             branch_name = f"sync/gitlab-{timestamp}-{uuid.uuid4().hex[:8]}"
             try:
-                subprocess.run(['git', 'checkout', '-b', branch_name], cwd=repo_path, check=True)
+                subprocess.run(
+                    ['git', 'checkout', '-b', branch_name], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
             except subprocess.CalledProcessError as e:
                 print(f"error: Failed to create sync branch '{branch_name}': {e.stderr}")
                 raise
@@ -200,46 +212,63 @@ def main() -> None:
             # Nothing to merge
             if not commit_count:
                 try:
-                    subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
-                    subprocess.run(['git', 'branch', '-D', branch_name], cwd=repo_path, check=True)
+                    subprocess.run(
+                        ['git', 'checkout', TARGET_BRANCH], 
+                        cwd=repo_path, check=True, capture_output=True, text=True,
+                    )
+                    subprocess.run(
+                        ['git', 'branch', '-D', branch_name], 
+                        cwd=repo_path, check=True, capture_output=True, text=True,
+                    )
                 except subprocess.CalledProcessError as e:
                     print(f"warn: Failed to clean up empty sync branch '{branch_name}': {e.stderr}")
-                raise
+                except Exception as e:
+                    print(f"warn: Failed to clean up empty sync branch '{branch_name}': {e}")
 
             # Merge the sync branch into the target branch
             try:
-                subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
+                subprocess.run(
+                    ['git', 'checkout', TARGET_BRANCH], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
                 subprocess.run(
                     [
                         'git', 'merge', '--no-ff', branch_name,
                         '-m', f'Merge synchronization branch {branch_name}',
                     ],
-                    cwd=repo_path, check=True,
+                    cwd=repo_path, check=True, capture_output=True, text=True,
                 )
             except subprocess.CalledProcessError as e:
                 print(
                     f"error: Failed to merge sync branch '{branch_name}' into '{TARGET_BRANCH}': {e.stderr}"
                 )
-                return
+                raise
 
             # Push merged changes
             print("info: Pushing all changes to GitHub...")
             try:
-                subprocess.run(['git', 'push', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
+                subprocess.run(
+                    ['git', 'push', 'origin', TARGET_BRANCH], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
                 print("info: Sync complete!")
             except subprocess.CalledProcessError as e:
                 print(f"error: Failed to push commits to '{TARGET_BRANCH}': {e.stderr}")
-                return
+                raise
 
             # Delete the local sync branch
             try:
-                subprocess.run(['git', 'branch', '-D', branch_name], cwd=repo_path, check=True)
+                subprocess.run(
+                    ['git', 'branch', '-D', branch_name], 
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
             except subprocess.CalledProcessError as e:
                 print(f"warn: Failed to delete local sync branch '{branch_name}': {e.stderr}")
 
             print(f"info: Finished sync into target branch {TARGET_BRANCH}")
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
+            print(f"error: An unexpected error occurred: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
