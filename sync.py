@@ -6,6 +6,7 @@ import requests
 import subprocess
 import sys
 from datetime import datetime, timedelta, UTC
+from typing import Generator, Optional
 import uuid
 
 dotenv.load_dotenv()
@@ -30,7 +31,7 @@ STATE_FILE = os.getenv("STATE_FILE_NAME") or "last_sync_date.txt"
 HEADERS = {
     "Authorization": f"Bearer {GITLAB_TOKEN}",
     "Accept": "application/json",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
 }
 TARGET_BRANCH = os.getenv("GITHUB_BRANCH") or "main"
 
@@ -48,7 +49,7 @@ if missing:
     print(f"error: Missing required environment variables: {', '.join(missing)}")
     sys.exit(1)
 
-def setup_github_repo():
+def setup_github_repo() -> str:
     """Clones the GitHub repo if it doesn't exist, ensures target 
     branch is current, and creates a unique sync branch.
 
@@ -82,7 +83,7 @@ def setup_github_repo():
 
     return branch_name
 
-def get_last_sync_date():
+def get_last_sync_date() -> str:
     """
     Reads the last sync date from the state file within the repo,
     or returns the default if the file doesn't exist.
@@ -99,7 +100,7 @@ def get_last_sync_date():
         )
         return DEFAULT_START_DATE
 
-def stream_gitlab_events(since_date):
+def stream_gitlab_events(since_date: str) -> Generator[dict, None, None]:
     """
     Fetches GitLab events page by page using a generator.
     Yields events one by one to save memory.
@@ -128,7 +129,7 @@ def stream_gitlab_events(since_date):
 
         page += 1
 
-def sync_events_and_update_state(events):
+def sync_events_and_update_state(events: Generator[dict, None, None]) -> int:
     """
     Creates empty commits for each event, updates the state file,
     and pushes all changes to GitHub.
@@ -182,7 +183,7 @@ def sync_events_and_update_state(events):
 
     return commit_count
 
-def main():
+def main() -> None:
     """Main function to run the sync process."""
     original_cwd = os.getcwd()
     repo_path = os.path.join(original_cwd, GITHUB_REPO_NAME)
