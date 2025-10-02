@@ -49,6 +49,9 @@ if missing:
     print(f"error: Missing required environment variables: {', '.join(missing)}")
     sys.exit(1)
 
+session = requests.Session()
+session.headers.update(HEADERS)
+
 def setup_github_repo() -> str:
     """Clones the GitHub repo if it doesn't exist, ensures target 
     branch is current, and creates a unique sync branch.
@@ -113,7 +116,7 @@ def stream_gitlab_events(since_date: str) -> Generator[dict, None, None]:
             f"?after={since_date}&per_page={COMMITS_PER_PAGE}&page={page}&action=pushed&sort=asc"
         )
         try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
+            response = session.get(url, timeout=10)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"error: Failed to fetch events: {e}")
