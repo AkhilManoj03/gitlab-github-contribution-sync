@@ -1,5 +1,4 @@
 import dotenv
-import json
 import os
 import requests
 import subprocess
@@ -8,7 +7,7 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator
 
 dotenv.load_dotenv()
 
