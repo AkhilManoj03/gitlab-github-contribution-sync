@@ -53,58 +53,6 @@ if missing:
 session = requests.Session()
 session.headers.update(HEADERS)
 
-def setup_github_repo(repo_path: Path) -> str:
-    """Clones the GitHub repo, ensures target 
-    branch is current, and creates a unique sync branch.
-
-    Args:
-        repo_path: Path to clone the repository into.
-
-    Returns the created branch name.
-    """
-    print(f"info: Cloning repository '{GITHUB_REPO_NAME}'...")
-    subprocess.run(['git', 'clone', GITHUB_REPO_URL, str(repo_path)], check=True)
-
-    # Ensure local target branch is up to date
-    try:
-        subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True)
-        subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
-        subprocess.run(['git', 'pull', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"error: Failed to prepare target branch '{TARGET_BRANCH}': {e.stderr}")
-        raise
-
-    # Create a unique branch for this run and switch to it
-    timestamp = datetime.now(UTC).strftime('%Y%m%d%H%M%S')
-    branch_name = f"sync/gitlab-{timestamp}-{uuid.uuid4().hex[:8]}"
-    try:
-        subprocess.run(['git', 'checkout', '-b', branch_name], cwd=repo_path, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"error: Failed to create sync branch '{branch_name}': {e.stderr}")
-        raise
-
-    return branch_name
-
-def get_last_sync_date(repo_path: Path) -> str:
-    """
-    Reads the last sync date from the state file within the repo,
-    or returns the default if the file doesn't exist.
-
-    Args:
-        repo_path: Path to the repository.
-    """
-    state_file_path = repo_path / STATE_FILE
-    try:
-        date_str = state_file_path.read_text().strip()
-        print(f"info: Found state file. Starting sync from: {date_str}")
-        return date_str
-    except FileNotFoundError:
-        print(
-            f"info: State file '{STATE_FILE}' not found in repo. "
-            f"Starting from default date (1 year ago): {DEFAULT_START_DATE}"
-        )
-        return DEFAULT_START_DATE
-
 def stream_gitlab_events(since_date: str) -> Generator[dict, None, None]:
     """
     Fetches GitLab events page by page using a generator.
@@ -189,7 +137,7 @@ def sync_events_and_update_state(events: Generator[dict, None, None], repo_path:
     state_file_path.write_text(next_start_dt_utc.isoformat().replace('+00:00', 'Z'))
 
     subprocess.run(['git', 'add', STATE_FILE], cwd=repo_path, check=True)
-    
+
     # Only commit if there are changes (exit code 1 means there are changes)
     result = subprocess.run(
         ['git', 'diff', '--cached', '--quiet'],
@@ -208,9 +156,40 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         repo_path = Path(temp_dir) / GITHUB_REPO_NAME
         try:
-            branch_name = setup_github_repo(repo_path)
+            print(f"info: Cloning repository '{GITHUB_REPO_NAME}'...")
+            subprocess.run(['git', 'clone', GITHUB_REPO_URL, str(repo_path)], check=True)
 
-            start_date = get_last_sync_date(repo_path)
+            # Ensure local target branch is up to date
+            try:
+                subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True)
+                subprocess.run(['git', 'checkout', TARGET_BRANCH], cwd=repo_path, check=True)
+                subprocess.run(['git', 'pull', 'origin', TARGET_BRANCH], cwd=repo_path, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"error: Failed to prepare target branch '{TARGET_BRANCH}': {e.stderr}")
+                raise
+
+            # Create a unique branch for this run and switch to it
+            timestamp = datetime.now(UTC).strftime('%Y%m%d%H%M%S')
+            branch_name = f"sync/gitlab-{timestamp}-{uuid.uuid4().hex[:8]}"
+            try:
+                subprocess.run(['git', 'checkout', '-b', branch_name], cwd=repo_path, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"error: Failed to create sync branch '{branch_name}': {e.stderr}")
+                raise
+
+            state_file_path = repo_path / STATE_FILE
+            try:
+                start_date = state_file_path.read_text().strip()
+                print(f"info: Found state file. Starting sync from: {start_date}")
+            except FileNotFoundError:
+                print(
+                    f"info: State file '{STATE_FILE}' not found in repo. "
+                    f"Starting from default date (1 year ago): {DEFAULT_START_DATE}"
+                )
+                start_date = DEFAULT_START_DATE
+            except Exception as e:
+                print(f"error: Failed to read state file: {e}")
+                raise
 
             # Create the generator object with the start date
             gitlab_events = stream_gitlab_events(since_date=start_date)
@@ -225,7 +204,7 @@ def main() -> None:
                     subprocess.run(['git', 'branch', '-D', branch_name], cwd=repo_path, check=True)
                 except subprocess.CalledProcessError as e:
                     print(f"warn: Failed to clean up empty sync branch '{branch_name}': {e.stderr}")
-                return
+                raise
 
             # Merge the sync branch into the target branch
             try:
